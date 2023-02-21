@@ -1,134 +1,110 @@
+
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
 #include <stdio.h>
-#include <stdlib.h>
+#include <iostream>
 
-#define GPUErrorAssertion(ans) {gpuAssert((ans), __FILE__, __LINE__);}
+using namespace std;
+
+#define GPUErrorAssertion(ans) {gpuAssert((ans), __FILE__, __LINE__); }
 
 inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort = true) {
     if (code != cudaSuccess) {
         fprintf(stderr, "GPUassert: %s %s %d\n\r", cudaGetErrorString(code), file, line);
-        if (abort)exit(code);
+        if (abort) exit(code);
     }
 }
 
-__global__ void idx_calc_gid_3D(int* input) {
-    int totalThreads = blockDim.x * blockDim.y * blockDim.z;
-    int tid = threadIdx.x // 1D
-        + threadIdx.y * blockDim.x // 2D
-        + threadIdx.z * blockDim.x * blockDim.y; // 3D
-    int bid = blockIdx.x // 1D
-        + blockIdx.y * gridDim.x // 2D
-        + blockIdx.z * gridDim.x * gridDim.y; // 3D
-    int gid = tid + bid * totalThreads;
-    printf("[DEVICE] gid: %d, data: %d\n\r", gid, input[gid]);
-}
+__global__ void multMat(int* a, int* b, int* c, int width, int rows, int cols) { 
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-__global__ void sum_array_gpu(int* a, int* b, int* c, int size) {
-    int totalThreads = blockDim.x * blockDim.y * blockDim.z;
-    int tid = threadIdx.x // 1D
-        + threadIdx.y * blockDim.x // 2D
-        + threadIdx.z * blockDim.x * blockDim.y; // 3D
-    int bid = blockIdx.x // 1D
-        + blockIdx.y * gridDim.x // 2D
-        + blockIdx.z * gridDim.x * gridDim.y; // 3D
-    int gid = tid + bid * totalThreads;
-    if (gid < size) {
-        c[gid] = a[gid] + b[gid];
-    }
-}
+    int aux = 0;
 
-void sum_array_cpu(int* a, int* b, int* c, int size) {
-    for (int i = 0; i < size; i++)
-    {
-        c[i] = a[i] + b[i];
-    }
-}
-
-__global__ void sum_array_gpu_3(int* a, int* b, int* c, int* ans, int size) {
-    int totalThreads = blockDim.x * blockDim.y * blockDim.z;
-    int tid = threadIdx.x // 1D
-        + threadIdx.y * blockDim.x // 2D
-        + threadIdx.z * blockDim.x * blockDim.y; // 3D
-    int bid = blockIdx.x // 1D
-        + blockIdx.y * gridDim.x // 2D
-        + blockIdx.z * gridDim.x * gridDim.y; // 3D
-    int gid = tid + bid * totalThreads;
-    if (gid < size) {
-        ans[gid] = a[gid] + b[gid] + c[gid];
-    }
-}
-
-void sum_array_cpu_3(int* a, int* b, int* c, int* ans, int size) {
-    for (int i = 0; i < size; i++)
-    {
-        ans[i] = a[i] + b[i] + c[i];
+    if (row < rows && col < cols) {
+        for (int i = 0; i < width; i++) {
+            aux += a[row * width + i] * b[i * width + col];
+        }
+        c[row * width + col] = aux;
     }
 }
 
 int main()
 {
-    const int N = 10000;
+    int rows = 64;
+    int cols = 32;
+    int Arows = rows;
+    int Acols = cols;
+    int Brows = cols;
+    int Bcols = rows;
+    int Crows = rows;
+    int Ccols = rows;
 
-    int a[N];
-    int b[N];
-    int c[N];
-    int sumGPU[N];
-    int sumCPU[N];
-    bool meow = true;
+    int Abytes = Arows * Acols * sizeof(int);
+    int Bbytes = Brows * Bcols * sizeof(int);
+    int Cbytes = Crows * Ccols * sizeof(int);
+    int blockSize = 2;
 
-    for (int i = 0; i < N; i++) {
-        a[i] = rand() % 256;
-        b[i] = rand() % 256;
-        c[i] = rand() % 256;
-    }
+    int Csize = Crows * Ccols;
 
-    int size = N * sizeof(int);
+    int* h_a, * h_b, * h_c, * gpu_res;
 
-    int* d_a = 0;
-    int* d_b = 0;
-    int* d_c = 0;
-    int* d_sumGPU;
+    h_a = (int*)malloc(Abytes);
+    h_b = (int*)malloc(Bbytes);
+    h_c = (int*)malloc(Cbytes);
+    gpu_res = (int*)malloc(Cbytes);
+    memset(gpu_res, 0, Cbytes);
 
-    cudaMalloc((void**)&d_a, size);
-    cudaMalloc((void**)&d_b, size);
-    cudaMalloc((void**)&d_sumGPU, size);
+    time_t t;
+    srand((unsigned)time(&t));
 
-    cudaMemcpy(d_a, a, size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, b, size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_c, c, size, cudaMemcpyHostToDevice);
-  
-    clock_t gpu_start, gpu_stop;  
-  
-    gpu_start = clock();
-    sum_array_gpu_3 << <79, 128 >> > (d_a, d_b, d_c d_sumGPU, N);
-    sum_array_cpu_3(a, b, c, sumCPU, N);
-    cudaDeviceSynchronize();
-    gpu_stop = clock();
-    cudaDeviceReset();
-
-    double cps_gpu = (double)((double)(gpu_stop - gpu_start) / CLOCKS_PER_SEC);
-    printf("Execution Time [ET-GPU]: %4.6f\n\r", cps_gpu);
-
-    cudaMemcpy(sumGPU, d_sumGPU, size, cudaMemcpyDeviceToHost);
-
-    for (int i = 0; i < N; i++) {
-        if (sumGPU[i] != sumCPU[i]) {
-            meow = false;
-            break;
+    for (int i = 0; i < Arows; i++)
+    {
+        for (int j = 0; j < Acols; j++)
+        {
+            h_a[i * Acols + j] = rand() % 2;
+            h_b[i * Bcols + j] = rand() % 2;
         }
     }
 
-    if (meow) {
-        printf("Both arrays are equal");
-    }
-    else {
-        printf("The arrays are not equal");
+    int* d_a, * d_b, * d_c, * d_out;
+
+    GPUErrorAssertion(cudaMalloc((int**)&d_a, Abytes));
+    GPUErrorAssertion(cudaMalloc((int**)&d_b, Bbytes));
+    GPUErrorAssertion(cudaMalloc((int**)&d_c, Cbytes));
+    GPUErrorAssertion(cudaMalloc((int**)&d_out, Cbytes));
+
+    GPUErrorAssertion(cudaMemcpy(d_a, h_a, Abytes, cudaMemcpyHostToDevice));
+    GPUErrorAssertion(cudaMemcpy(d_b, h_b, Bbytes, cudaMemcpyHostToDevice));
+    GPUErrorAssertion(cudaMemcpy(d_c, h_c, Cbytes, cudaMemcpyHostToDevice));
+    GPUErrorAssertion(cudaMemcpy(d_out, gpu_res, Cbytes, cudaMemcpyHostToDevice));
+
+    dim3 block(blockSize, blockSize);
+    dim3 grid(ceil(Csize / blockSize), ceil(Csize / blockSize));
+
+    clock_t gpu_start, gpu_stop;
+
+    gpu_start = clock();
+    multMat << <grid, block >> > (d_a, d_b, d_c, Acols, Crows, Ccols);
+    cudaDeviceSynchronize();
+    gpu_stop = clock();
+    double cps_gpu = (double)((double)(gpu_stop - gpu_start) / CLOCKS_PER_SEC);
+    printf("Execution time [ET_GPU]: %4.6f \n\r", cps_gpu);
+
+    cudaMemcpy(d_c, h_c, Csize, cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < Crows; i++)
+    {
+        for (int j = 0; j < Ccols; j++)
+        {
+            cout << h_c[i * blockSize + j] << " ";
+        }
     }
 
     cudaDeviceReset();
-
     cudaFree(d_a);
-    return 0;
+    cudaFree(d_b);
+    cudaFree(d_c);
+    cudaFree(d_out);
 }
